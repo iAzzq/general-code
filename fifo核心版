@@ -1,0 +1,22 @@
+
+IF #start_in THEN    
+    #Buffer[#length]:=#data;
+END_IF;
+
+FOR #i := #length TO 1 BY -1 DO
+    IF #Buffer[#i] <> 0 AND #Buffer[#i - 1] = 0 THEN
+        #Buffer[#i - 1] := #Buffer[#i];
+        #Buffer[#i] := 0;
+    END_IF;
+END_FOR;
+
+IF #start_out THEN
+    #out := #Buffer[0]; 
+    #Buffer[0] := 0;
+END_IF;
+
+
+
+
+
+
