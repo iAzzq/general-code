@@ -1,0 +1,147 @@
+FUNCTION_BLOCK "SCL轮询Modbus"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   VAR_INPUT 
+      BAUD : UDInt := 9600;   // 波特率
+      PARITY : UInt;   // 奇偶校验位
+      PORT : PORT;   // 硬件端口号
+      TIME_OUT : UInt := 200;   // 超时时间
+   END_VAR
+
+   VAR_OUTPUT 
+      LOAD_ERROR : Bool;   // Modbus初始化错误位
+      LOAD_STATUS : Word;   // Modbus初始化错误状态
+      Error_Stations : DInt;   // 掉站数量
+   END_VAR
+
+   VAR_IN_OUT 
+      MB_DATA : Array[0..2] of "MB_MASTER_DATA";   // 轮询数据
+   END_VAR
+
+   VAR 
+      Rising { S7_SetPoint := 'True'} : Bool := 1;   // 首次扫描该FB函数快
+      MB_COMM_LOAD_Instance {InstructionName := 'MB_COMM_LOAD'; LibVersion := '2.1'} : MB_COMM_LOAD;
+      MB_MASTER_Instance {InstructionName := 'MB_MASTER'; LibVersion := '2.2'} : MB_MASTER;
+      Polling_Index { S7_SetPoint := 'True'} : DInt;   // 当前正在执行轮询数组的索引
+      R_TRIG_Instance {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // 初始化完成沿信号
+      Error_Station_Count { S7_SetPoint := 'True'} : DInt;   // 通信失败的站点数量
+   END_VAR
+
+   VAR_TEMP 
+      Temp_Lower_bound : DInt;   // 数组上限索引
+      Temp_Upper_bound : DInt;   // 数组下限索引
+      REQ : Bool;   // 轮询标识位
+   END_VAR
+
+
+BEGIN
+	(*
+	使用者须知：
+	1. 该FB要选择“非优化的块访问”，需要轮询多少个站点，更改此FB块中InOut中的MB_DATA轮询数组长度即可
+	2. 调用时传入的MB_DATA参数的DB数据块也要设置为“非优化的数据块”，
+	   并且长度要和此FB块中的InOut的MB_DATA轮询数组长度保持一致
+	3，此FB块内的#Temp_Lower_bound和#Temp_Upper_bound索引表示轮询数组的上限索引和下限索引
+	   和此FB块内的MB_DATA轮询数组索引一致
+	*)
+	
+	// 初始化启用MODBUS协议
+	#MB_COMM_LOAD_Instance(REQ := #Rising,     // Rising=1表示首次进入该FB
+	                       "PORT" := #PORT,    // 硬件端口
+	                       BAUD := #BAUD,      // 波特率
+	                       PARITY := #PARITY,  // 奇偶校验
+	                       FLOW_CTRL := 0,
+	                       RTS_ON_DLY := 0,
+	                       RTS_OFF_DLY := 0,
+	                       RESP_TO := #TIME_OUT,         // 超时事件
+	                       ERROR => #LOAD_ERROR,         // Modbus初始化错误位
+	                       STATUS => #LOAD_STATUS,       // Modbus初始化错误状态
+	                       MB_DB := #MB_MASTER_Instance);// Master_DB的引用
+	
+	// 要轮询的站点数量
+	#Temp_Lower_bound := 0;   // 数组下限索引值
+	#Temp_Upper_bound := 2;   // 数组上限索引值
+	
+	// 初始化报错，不执行轮询
+	IF #LOAD_ERROR THEN
+	    #Error_Station_Count := #Temp_Upper_bound - #Temp_Lower_bound +1;
+	    #Rising := 1;
+	    RETURN;
+	END_IF;
+	
+	// Modbus初始化完成
+	#R_TRIG_Instance(CLK := #MB_COMM_LOAD_Instance.DONE);
+	IF #R_TRIG_Instance.Q THEN
+	    #Error_Station_Count := 0;
+	    #REQ := 1;
+	    #Polling_Index := #Temp_Lower_bound;
+	    #MB_MASTER_Instance.DONE := #MB_MASTER_Instance.ERROR := 0;
+	END_IF;
+	
+	// Modbus数据请求成功
+	IF #MB_MASTER_Instance.DONE OR #MB_MASTER_Instance.ERROR THEN
+	    #REQ := 1;
+	    
+	    // 第一个轮询
+	    IF #Polling_Index = #Temp_Lower_bound THEN
+	        #Error_Station_Count := 0;
+	    END_IF;
+	    
+	    // 轮询结束，从头开始继续轮询
+	    IF #Polling_Index = #Temp_Upper_bound THEN
+	        #Polling_Index := #Temp_Lower_bound;
+	    ELSE
+	        // 数组索引+1，开始轮循下一个
+	        #Polling_Index += 1;
+	    END_IF;
+	END_IF;
+	
+	// 执行轮询操作
+	#MB_MASTER_Instance(REQ:=#REQ,
+	                    MB_ADDR:=#MB_DATA[#Polling_Index].MB_ADDR,
+	                    MODE:=#MB_DATA[#Polling_Index].MODE,
+	                    DATA_ADDR:=#MB_DATA[#Polling_Index].DATA_ADDR,
+	                    DATA_LEN:=#MB_DATA[#Polling_Index].DATA_LEN,
+	                    DATA_PTR:=#MB_DATA[#Polling_Index].DATA_PTR);
+	// 轮询出错
+	IF #MB_MASTER_Instance.ERROR THEN
+	    #Error_Station_Count += 1;
+	    #MB_DATA[#Polling_Index].ERROR := 1;
+	    #MB_DATA[#Polling_Index].STATUS := #MB_MASTER_Instance.STATUS;
+	ELSE
+	    #MB_DATA[#Polling_Index].ERROR := 0;
+	    #MB_DATA[#Polling_Index].STATUS := 0;
+	END_IF;
+	// 返回出错站点数量
+	#Error_Stations := #Error_Station_Count;
+	
+	// 发出信号之后，将信号置0
+	#REQ := 0;
+	                       
+	// 将Static变量置0，处理首次进入FB信号，执行到这里说明FB已经扫描完成
+	#Rising := 0;
+END_FUNCTION_BLOCK
+
+
+
+
+
+
+
+TYPE "MB_MASTER_DATA"
+VERSION : 0.1
+   STRUCT
+      MB_ADDR : UInt;
+      MODE : USInt;
+      DATA_ADDR : UDInt;
+      DATA_LEN : UInt;
+      DATA_PTR : Array[0..9] of Word;
+      ERROR : Bool;
+      STATUS : Word;
+   END_STRUCT;
+
+END_TYPE
+
+
+
+
+
